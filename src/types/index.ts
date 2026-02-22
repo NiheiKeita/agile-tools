@@ -1,28 +1,20 @@
-// クライアント -> サーバー
-export type ClientMessage =
-  | { type: 'join'; userId: string; nickname: string }
+// P2P メッセージ（グループ内でクライアント間で直接やり取り）
+export type PeerMessage =
+  | { type: 'join'; userId: string; nickname: string; isHost?: boolean }
   | { type: 'leave'; userId: string }
   | { type: 'vote'; userId: string; value: string }
-  | { type: 'reveal' }
-  | { type: 'reset' }
-  | { type: 'setStory'; story: string; storyUrl?: string };
-
-// サーバー -> クライアント
-export type ServerMessage =
-  | { type: 'roomState'; state: RoomState }
-  | { type: 'userJoined'; user: Participant }
-  | { type: 'userLeft'; userId: string }
-  | { type: 'voted'; userId: string }
-  | { type: 'revealed'; votes: Record<string, string> }
-  | { type: 'reset' }
-  | { type: 'storyUpdated'; story: string; storyUrl?: string };
+  | { type: 'reveal'; userId: string }
+  | { type: 'reset'; userId: string }
+  | { type: 'setStory'; userId: string; story: string; storyUrl?: string }
+  | { type: 'heartbeat'; userId: string; nickname: string }
+  | { type: 'syncResponse'; targetUserId: string; state: RoomState };
 
 export interface RoomState {
   roomId: string;
   story: string | null;
   storyUrl: string | null;
   participants: Participant[];
-  votes: Record<string, string>; // userId -> カード値（公開後のみ）
+  votes: Record<string, string>; // userId -> カード値（公開後のみ同期）
   isRevealed: boolean;
   facilitatorId: string;
 }

@@ -1,20 +1,24 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ClientMessage, ServerMessage } from '@/types';
+import type { PeerMessage } from '@/types';
 
 interface UseWebPubSubOptions {
   roomId: string;
   userId: string;
   nickname: string;
-  onMessage: (message: ServerMessage) => void;
+  isHost: boolean;
+  onMessage: (message: PeerMessage) => void;
   enabled?: boolean;
 }
+
+const HEARTBEAT_INTERVAL = 5000; // 5秒
 
 export function useWebPubSub({
   roomId,
   userId,
   nickname,
+  isHost,
   onMessage,
   enabled = true,
 }: UseWebPubSubOptions) {
@@ -22,11 +26,23 @@ export function useWebPubSub({
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const onMessageRef = useRef(onMessage);
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // onMessageを常に最新に保つ
   useEffect(() => {
     onMessageRef.current = onMessage;
   }, [onMessage]);
+
+  const send = useCallback((message: PeerMessage) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'sendToGroup',
+        group: roomId,
+        noEcho: true,
+        dataType: 'json',
+        data: message,
+      }));
+    }
+  }, [roomId]);
 
   const connect = useCallback(async () => {
     if (!enabled || !userId) return;
@@ -43,82 +59,77 @@ export function useWebPubSub({
       ws.onopen = () => {
         console.log('[WS] Connected');
         setIsConnected(true);
-        // 明示的にグループに参加
         if (ws.readyState === WebSocket.OPEN) {
-          const joinGroupMsg = {
+          ws.send(JSON.stringify({
             type: 'joinGroup',
             group: roomId,
             ackId: 1,
-          };
-          console.log('[WS] Sending joinGroup:', joinGroupMsg);
-          ws.send(JSON.stringify(joinGroupMsg));
+          }));
         }
       };
 
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          console.log('[WS] Received:', data);
-          console.log('[WS] Message type:', data.type, 'from:', data.from);
 
-          // joinGroupのackを受け取ったら、joinイベントをサーバーに送信
+          // joinGroup の ack → グループに join を送信 & heartbeat 開始
           if (data.type === 'ack' && data.ackId === 1) {
-            console.log('[WS] joinGroup ack received, success:', data.success);
             if (data.success && ws.readyState === WebSocket.OPEN) {
-              const joinEvent = {
-                type: 'event',
-                event: 'poker-event',
+              const joinMsg: PeerMessage = { type: 'join', userId, nickname, isHost };
+              ws.send(JSON.stringify({
+                type: 'sendToGroup',
+                group: roomId,
+                noEcho: true,
                 dataType: 'json',
-                data: { type: 'join', userId, nickname, roomId },
-              };
-              console.log('[WS] Sending join event to server:', joinEvent);
-              ws.send(JSON.stringify(joinEvent));
+                data: joinMsg,
+              }));
+
+              // heartbeat 開始
+              if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+              heartbeatRef.current = setInterval(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({
+                    type: 'sendToGroup',
+                    group: roomId,
+                    noEcho: true,
+                    dataType: 'json',
+                    data: { type: 'heartbeat', userId, nickname } satisfies PeerMessage,
+                  }));
+                }
+              }, HEARTBEAT_INTERVAL);
             }
           }
 
-          // Web PubSubプロトコルメッセージの処理
-          if (data.type === 'message') {
-            if (data.from === 'group') {
-              console.log('[WS] Group message received:', data.data);
-              onMessageRef.current(data.data);
-            } else if (data.from === 'server') {
-              console.log('[WS] Server message received:', data.data);
-              onMessageRef.current(data.data);
-            }
-          } else if (data.type !== 'ack' && data.type !== 'system') {
-            console.log('[WS] Message did not match message criteria');
+          // グループメッセージ（他のクライアントから）
+          if (data.type === 'message' && data.from === 'group') {
+            onMessageRef.current(data.data);
           }
         } catch (e) {
           console.error('Failed to parse message:', e);
         }
       };
 
-      ws.onerror = () => {
-        setError(new Error('WebSocket error'));
-      };
+      ws.onerror = () => setError(new Error('WebSocket error'));
 
       ws.onclose = () => {
         setIsConnected(false);
+        if (heartbeatRef.current) {
+          clearInterval(heartbeatRef.current);
+          heartbeatRef.current = null;
+        }
       };
     } catch (e) {
       setError(e instanceof Error ? e : new Error('Unknown error'));
     }
-  }, [roomId, userId, nickname, enabled]);
-
-  const send = useCallback((message: ClientMessage) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'event',
-        event: 'poker-event',
-        dataType: 'json',
-        data: { ...message, roomId },
-      }));
-    }
-  }, [roomId]);
+  }, [roomId, userId, nickname, isHost, enabled]);
 
   const disconnect = useCallback(() => {
     if (userId && wsRef.current?.readyState === WebSocket.OPEN) {
       send({ type: 'leave', userId });
+    }
+    if (heartbeatRef.current) {
+      clearInterval(heartbeatRef.current);
+      heartbeatRef.current = null;
     }
     wsRef.current?.close();
   }, [send, userId]);
