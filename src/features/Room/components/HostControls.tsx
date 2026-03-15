@@ -20,6 +20,11 @@ export function HostControls({ isRevealed, allVoted, onReveal, onReset }: HostCo
           全員がカードを選択しました！公開できます
         </Alert>
       )}
+      {!allVoted && !isRevealed && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          未投票の参加者がいても、ホストはいつでもカードを公開できます
+        </Alert>
+      )}
       <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
         <Button
           variant="contained"
@@ -43,7 +48,7 @@ export function HostControls({ isRevealed, allVoted, onReveal, onReset }: HostCo
             },
           } : undefined}
         >
-          カードを公開
+          {allVoted ? 'カードを公開' : '強制的にカードを公開'}
         </Button>
       </Box>
     </Paper>

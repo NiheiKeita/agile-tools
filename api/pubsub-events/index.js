@@ -8,6 +8,7 @@ if (typeof global !== 'undefined' && !global.crypto) {
 
 // インメモリでルーム状態を管理（MVPとして簡易実装）
 const rooms = new Map();
+const connections = new Map(); // connectionId -> { roomId, userId }
 
 function getRoomState(roomId) {
   if (!rooms.has(roomId)) {
@@ -21,6 +22,62 @@ function getRoomState(roomId) {
     });
   }
   return rooms.get(roomId);
+}
+
+function serializeRoomState(roomId, roomState) {
+  return {
+    roomId,
+    participants: Array.from(roomState.participants.entries()).map(([id, p]) => ({
+      id,
+      nickname: p.nickname,
+      hasVoted: p.hasVoted,
+    })),
+    votes: roomState.isRevealed ? Object.fromEntries(roomState.votes) : {},
+    isRevealed: roomState.isRevealed,
+    facilitatorId: roomState.facilitatorId,
+    story: roomState.story,
+    storyUrl: roomState.storyUrl,
+  };
+}
+
+async function broadcastRoomState(client, roomId, roomState) {
+  await client.group(roomId).sendToAll({
+    type: 'roomState',
+    state: serializeRoomState(roomId, roomState),
+  });
+}
+
+function promoteNextFacilitator(roomState) {
+  const nextParticipant = roomState.participants.keys().next();
+  roomState.facilitatorId = nextParticipant.done ? null : nextParticipant.value;
+}
+
+async function removeParticipant(client, roomId, userId, connectionId) {
+  const roomState = rooms.get(roomId);
+  if (!roomState || !roomState.participants.has(userId)) {
+    connections.delete(connectionId);
+    return;
+  }
+
+  roomState.participants.delete(userId);
+  roomState.votes.delete(userId);
+
+  if (roomState.facilitatorId === userId) {
+    promoteNextFacilitator(roomState);
+  }
+
+  if (roomState.participants.size === 0) {
+    rooms.delete(roomId);
+    connections.delete(connectionId);
+    return;
+  }
+
+  await client.group(roomId).sendToAll({
+    type: 'userLeft',
+    userId,
+  });
+  await broadcastRoomState(client, roomId, roomState);
+  connections.delete(connectionId);
 }
 
 module.exports = async function (context, req) {
@@ -61,7 +118,10 @@ module.exports = async function (context, req) {
 
   if (eventType === 'azure.webpubsub.sys.disconnected') {
     context.log(`User ${userId} disconnected`);
-    // TODO: ルームから削除してブロードキャスト
+    const connection = connections.get(connectionId);
+    if (connection) {
+      await removeParticipant(client, connection.roomId, connection.userId, connectionId);
+    }
     context.res = { status: 200 };
     return;
   }
@@ -102,6 +162,7 @@ module.exports = async function (context, req) {
             nickname: message.nickname,
             hasVoted: false,
           });
+          connections.set(connectionId, { roomId, userId });
 
           if (!roomState.facilitatorId) {
             roomState.facilitatorId = userId;
@@ -110,23 +171,7 @@ module.exports = async function (context, req) {
           // 参加したユーザーに現在のルーム状態を送信
           await client.sendToConnection(connectionId, {
             type: 'roomState',
-            state: {
-              roomId,
-              participants: Array.from(roomState.participants.entries()).map(
-                ([id, p]) => ({
-                  id,
-                  nickname: p.nickname,
-                  hasVoted: p.hasVoted,
-                })
-              ),
-              votes: roomState.isRevealed
-                ? Object.fromEntries(roomState.votes)
-                : {},
-              isRevealed: roomState.isRevealed,
-              facilitatorId: roomState.facilitatorId,
-              story: roomState.story,
-              storyUrl: roomState.storyUrl,
-            },
+            state: serializeRoomState(roomId, roomState),
           });
 
           // 他の参加者に参加通知（自分以外）
@@ -141,6 +186,10 @@ module.exports = async function (context, req) {
             },
             { filter: `userId ne '${userId}'` }
           );
+          break;
+
+        case 'leave':
+          await removeParticipant(client, roomId, userId, connectionId);
           break;
 
         case 'vote':
